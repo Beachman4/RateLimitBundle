@@ -14,6 +14,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Event\ControllerEvent;
 use Symfony\Component\HttpKernel\Event\FilterControllerEvent;
+use Symfony\Component\HttpKernel\Event\RequestEvent;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
 use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
@@ -48,93 +49,19 @@ class RateLimitAnnotationListener extends BaseListener
         $this->pathLimitProcessor = $pathLimitProcessor;
     }
 
+    public function onKernelRequest(RequestEvent $event)
+    {
+            $this->handleEvent($event);
+    }
+
     /**
      * @param ControllerEvent|FilterControllerEvent $event
      */
     public function onKernelController($event)
     {
         // Skip if the bundle isn't enabled (for instance in test environment)
-        if( ! $this->getParameter('enabled', true)) {
-            return;
-        }
-
-        // Skip if we aren't the main request
-        if ($event->getRequestType() != HttpKernelInterface::MASTER_REQUEST) {
-            return;
-        }
-
-        // Find the best match
-        $annotations = $event->getRequest()->attributes->get('_x-rate-limit', array());
-        $rateLimit = $this->findBestMethodMatch($event->getRequest(), $annotations);
-
-        // Another treatment before applying RateLimit ?
-        $checkedRateLimitEvent = new CheckedRateLimitEvent($event->getRequest(), $rateLimit);
-        $this->dispatch(RateLimitEvents::CHECKED_RATE_LIMIT, $checkedRateLimitEvent);
-        $rateLimit = $checkedRateLimitEvent->getRateLimit();
-
-        // No matching annotation found
-        if (! $rateLimit) {
-            return;
-        }
-
-        $key = $this->getKey($event, $rateLimit, $annotations);
-
-        // Ratelimit the call
-        $rateLimitInfo = $this->rateLimitService->limitRate($key);
-        if (! $rateLimitInfo) {
-            // Create new rate limit entry for this call
-            $rateLimitInfo = $this->rateLimitService->createRate($key, $rateLimit->getLimit(), $rateLimit->getPeriod());
-            if (! $rateLimitInfo) {
-                // @codeCoverageIgnoreStart
-                return;
-                // @codeCoverageIgnoreEnd
-            }
-        }
-
-
-        // Store the current rating info in the request attributes
-        $request = $event->getRequest();
-        $request->attributes->set('rate_limit_info', $rateLimitInfo);
-
-        // Reset the rate limits
-        if(time() >= $rateLimitInfo->getResetTimestamp()) {
-            $this->rateLimitService->resetRate($key);
-            $rateLimitInfo = $this->rateLimitService->createRate($key, $rateLimit->getLimit(), $rateLimit->getPeriod());
-            if (! $rateLimitInfo) {
-                // @codeCoverageIgnoreStart
-                return;
-                // @codeCoverageIgnoreEnd
-            }
-        }
-
-        // When we exceeded our limit, return a custom error response
-        if ($rateLimitInfo->getCalls() > $rateLimitInfo->getLimit()) {
-
-            // Throw an exception if configured.
-            if ($this->getParameter('rate_response_exception')) {
-                $class = $this->getParameter('rate_response_exception');
-
-                $e = new $class($this->getParameter('rate_response_message'), $this->getParameter('rate_response_code'));
-
-                if ($e instanceof RateLimitExceptionInterface) {
-                    $e->setPayload($rateLimit->getPayload());
-                }
-
-                throw $e;
-            }
-
-            $message = $this->getParameter('rate_response_message');
-            $code = $this->getParameter('rate_response_code');
-            $event->setController(function () use ($message, $code) {
-                // @codeCoverageIgnoreStart
-                return new Response($message, $code);
-                // @codeCoverageIgnoreEnd
-            });
-            $event->stopPropagation();
-        }
-
+        $this->handleEvent($event);
     }
-
 
     /**
      * @param RateLimit[] $annotations
@@ -165,7 +92,7 @@ class RateLimitAnnotationListener extends BaseListener
     }
 
     /**
-     * @param ControllerEvent|FilterControllerEvent $event
+     * @param ControllerEvent|FilterControllerEvent|RequestEvent $event
      * @param RateLimit $rateLimit
      * @param array $annotations
      * @return string
@@ -189,8 +116,8 @@ class RateLimitAnnotationListener extends BaseListener
     }
 
     /**
-     * @param string $route
-     * @param ControllerEvent|FilterControllerEvent $controller
+     * @param ControllerEvent|FilterControllerEvent|RequestEvent $event
+     *
      * @return mixed|string
      */
     private function getAliasForRequest($event)
@@ -228,6 +155,92 @@ class RateLimitAnnotationListener extends BaseListener
         } else {
             // Symfony 3.4
             $this->eventDispatcher->dispatch($eventName, $event);
+        }
+    }
+
+    /**
+     * @param RequestEvent $event
+     */
+    private function handleEvent($event): void
+    {
+        if (!$this->getParameter('enabled', true)) {
+            return;
+        }
+
+        // Skip if we aren't the main request
+        if ($event->getRequestType() != HttpKernelInterface::MASTER_REQUEST) {
+            return;
+        }
+
+        // Find the best match
+        $annotations = $event->getRequest()->attributes->get('_x-rate-limit', array());
+        $rateLimit = $this->findBestMethodMatch($event->getRequest(), $annotations);
+
+        // Another treatment before applying RateLimit ?
+        $checkedRateLimitEvent = new CheckedRateLimitEvent($event->getRequest(), $rateLimit);
+        $this->dispatch(RateLimitEvents::CHECKED_RATE_LIMIT, $checkedRateLimitEvent);
+        $rateLimit = $checkedRateLimitEvent->getRateLimit();
+
+        // No matching annotation found
+        if (!$rateLimit) {
+            return;
+        }
+
+        $key = $this->getKey($event, $rateLimit, $annotations);
+
+        // Ratelimit the call
+        $rateLimitInfo = $this->rateLimitService->limitRate($key);
+        if (!$rateLimitInfo) {
+            // Create new rate limit entry for this call
+            $rateLimitInfo = $this->rateLimitService->createRate($key, $rateLimit->getLimit(), $rateLimit->getPeriod());
+            if (!$rateLimitInfo) {
+                // @codeCoverageIgnoreStart
+                return;
+                // @codeCoverageIgnoreEnd
+            }
+        }
+
+
+        // Store the current rating info in the request attributes
+        $request = $event->getRequest();
+        $request->attributes->set('rate_limit_info', $rateLimitInfo);
+
+        // Reset the rate limits
+        if (time() >= $rateLimitInfo->getResetTimestamp()) {
+            $this->rateLimitService->resetRate($key);
+            $rateLimitInfo = $this->rateLimitService->createRate($key, $rateLimit->getLimit(), $rateLimit->getPeriod());
+            if (!$rateLimitInfo) {
+                // @codeCoverageIgnoreStart
+                return;
+                // @codeCoverageIgnoreEnd
+            }
+        }
+
+        // When we exceeded our limit, return a custom error response
+        if ($rateLimitInfo->getCalls() > $rateLimitInfo->getLimit()) {
+
+            // Throw an exception if configured.
+            if ($this->getParameter('rate_response_exception')) {
+                $class = $this->getParameter('rate_response_exception');
+
+                $e = new $class($this->getParameter('rate_response_message'),
+                    $this->getParameter('rate_response_code'));
+
+                if ($e instanceof RateLimitExceptionInterface) {
+                    $e->setPayload($rateLimit->getPayload());
+                }
+
+                throw $e;
+            }
+
+            $message = $this->getParameter('rate_response_message');
+            $code = $this->getParameter('rate_response_code');
+            $event->setController(function () use ($message, $code) {
+                // @codeCoverageIgnoreStart
+                return new Response($message, $code);
+                // @codeCoverageIgnoreEnd
+            });
+            $event->stopPropagation();
         }
     }
 
